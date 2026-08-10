@@ -1,180 +1,119 @@
-// AI Water Footprint Tracker — content script
-// Runs on every page. Heuristically detects "you typed something and hit
-// send" moments, watches the DOM for the reply that follows, estimates
-// token counts for both, and reports an estimated water usage to the
-// background service worker.
+// Default conversion fallback values
+const DEFAULT_CHARS_PER_TOKEN = 4;
+const DEFAULT_ML_PER_1000_TOKENS = 500; // ~0.5mL per 1k tokens
 
-(() => {
-  const DEFAULTS = {
-    charsPerToken: 4,        // rough English-text heuristic
-    mlPer1000Tokens: 500,    // editable in popup — this is a contested figure, treat as illustrative
-    minChars: 12,            // ignore tiny inputs (search boxes, login fields, etc.)
-    responseSettleMs: 1200,  // stop listening once the DOM has been quiet this long
-    responseTimeoutMs: 20000 // give up waiting for a response after this long
+let isObservingResponse = false;
+
+// Send accurate usage payload to background.js
+async function reportUsage(totalChars) {
+  const { settings } = await chrome.storage.local.get(["settings"]);
+  const charsPerToken = settings?.charsPerToken || DEFAULT_CHARS_PER_TOKEN;
+  const mlPer1000Tokens = settings?.mlPer1000Tokens || DEFAULT_ML_PER_1000_TOKENS;
+
+  // Calculate actual tokens from prompt + response combined
+  const totalTokens = Math.max(1, Math.ceil(totalChars / charsPerToken));
+  const estimatedMl = (totalTokens / 1000) * mlPer1000Tokens;
+
+  const payload = {
+    domain: window.location.hostname.replace("www.", ""),
+    estimatedMl: Math.max(0.1, estimatedMl),
+    totalTokens: totalTokens,
+    timestamp: Date.now()
   };
 
-  let settings = { ...DEFAULTS };
-
-  chrome.storage.local.get(["settings"], (data) => {
-    if (data && data.settings) settings = { ...DEFAULTS, ...data.settings };
+  chrome.runtime.sendMessage({ type: "LOG_USAGE", payload }, () => {
+    console.log("[AI Water Tracker] Recorded real response usage:", payload);
   });
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes.settings) {
-      settings = { ...DEFAULTS, ...changes.settings.newValue };
-    }
-  });
+}
 
-  const SEND_KEYWORDS = ["send", "submit", "ask", "generate"];
+// Track response completion using DOM observation
+function waitForResponseCompletion(promptCharCount) {
+  if (isObservingResponse) return;
+  isObservingResponse = true;
 
-  function looksLikeSendControl(el) {
-    if (!el) return false;
-    const label = (
-      el.getAttribute?.("aria-label") ||
-      el.getAttribute?.("title") ||
-      el.textContent ||
-      ""
-    ).toLowerCase();
-    if (el.type === "submit") return true;
-    return SEND_KEYWORDS.some((k) => label.includes(k));
-  }
+  const observer = new MutationObserver(() => {
+    // Check if ChatGPT/Claude has finished generating
+    // (e.g. stop button disappears or send button re-appears)
+    const isGenerating = document.querySelector('button[aria-label*="Stop"], button[data-testid="stop-button"]');
 
-  function getEditableText(el) {
-    if (!el) return "";
-    if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") return el.value || "";
-    if (el.isContentEditable) return el.innerText || el.textContent || "";
-    return "";
-  }
-
-  function findNearbyEditable(startEl) {
-    // Walk up a few levels, then look for a textarea/contenteditable within
-    // the same form/container — covers "send button next to the box" UIs.
-    let node = startEl;
-    for (let i = 0; i < 4 && node; i++) {
-      const container = node.closest?.("form, [role='form'], div") || node;
-      const candidate = container?.querySelector?.(
-        "textarea, [contenteditable='true'], [contenteditable='']"
-      );
-      if (candidate) return candidate;
-      node = node.parentElement;
-    }
-    return document.activeElement;
-  }
-
-  let lastSubmitAt = 0;
-  let watching = false;
-
-  function estimateTokens(text) {
-    return Math.max(0, Math.ceil(text.trim().length / settings.charsPerToken));
-  }
-
-  function reportUsage(queryText, responseText) {
-    const queryTokens = estimateTokens(queryText);
-    const responseTokens = estimateTokens(responseText);
-    const totalTokens = queryTokens + responseTokens;
-    if (totalTokens === 0) return;
-
-    const estimatedMl = (totalTokens / 1000) * settings.mlPer1000Tokens;
-
-    chrome.runtime.sendMessage({
-      type: "LOG_USAGE",
-      payload: {
-        domain: location.hostname,
-        queryTokens,
-        responseTokens,
-        totalTokens,
-        estimatedMl,
-        timestamp: Date.now()
-      }
-    });
-  }
-
-  function watchForResponse(queryText) {
-    if (watching) return;
-    watching = true;
-
-    let settleTimer = null;
-    let addedChars = 0;
-    const startedAt = Date.now();
-
-    const finish = () => {
+    if (!isGenerating) {
       observer.disconnect();
-      watching = false;
-      reportUsage(queryText, "x".repeat(addedChars)); // length is what matters, not content
-    };
+      isObservingResponse = false;
 
-    const observer = new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        m.addedNodes.forEach((node) => {
-          if (node.nodeType === Node.TEXT_NODE) {
-            addedChars += node.textContent.trim().length;
-          } else if (node.nodeType === Node.ELEMENT_NODE) {
-            const text = node.innerText || node.textContent || "";
-            addedChars += text.trim().length;
-          }
-        });
-      }
-      clearTimeout(settleTimer);
-      if (Date.now() - startedAt > settings.responseTimeoutMs) {
-        finish();
-        return;
-      }
-      settleTimer = setTimeout(finish, settings.responseSettleMs);
-    });
+      // Small delay to ensure last tokens are rendered
+      setTimeout(() => {
+        // Find the latest assistant response element
+        const responses = document.querySelectorAll(
+          'div[data-message-author-role="assistant"], div.font-claude-message, div[data-testid*="conversation-turn"]'
+        );
+        const lastResponse = responses[responses.length - 1];
+        
+        const responseText = lastResponse ? (lastResponse.innerText || "") : "";
+        const totalChars = promptCharCount + responseText.length;
 
-    observer.observe(document.body, { childList: true, subtree: true });
+        reportUsage(totalChars);
+      }, 500);
+    }
+  });
 
-    // Nothing ever arrived — bail out eventually so we don't watch forever.
-    settleTimer = setTimeout(finish, settings.responseTimeoutMs);
-  }
+  observer.observe(document.body, { childList: true, subtree: true });
+}
 
-  function handleSubmission(text) {
-    const trimmed = text.trim();
-    if (trimmed.length < settings.minChars) return;
+function handlePromptSubmit() {
+  const promptInput = document.querySelector(`
+    #prompt-textarea, 
+    div[contenteditable="true"], 
+    textarea[placeholder*="Ask"], 
+    textarea[placeholder*="Message"]
+  `);
 
-    const now = Date.now();
-    if (now - lastSubmitAt < 800) return; // debounce accidental double-fires
-    lastSubmitAt = now;
+  const promptText = promptInput?.value || promptInput?.innerText || "";
+  const promptCharCount = promptText.trim().length || 20;
 
-    watchForResponse(trimmed);
-  }
+  // Wait for the AI to start streaming and finish
+  setTimeout(() => {
+    waitForResponseCompletion(promptCharCount);
+  }, 1000);
+}
 
-  // 1) Enter key (without Shift) inside a textarea / contenteditable
-  document.addEventListener(
-    "keydown",
-    (e) => {
-      if (e.key !== "Enter" || e.shiftKey) return;
-      const el = e.target;
-      const text = getEditableText(el);
-      if (text && text.trim().length >= settings.minChars) {
-        handleSubmission(text);
-      }
-    },
-    true
-  );
+function initTracker() {
+  // 1. Listen for Send Button Click
+  document.addEventListener("click", (e) => {
+    const sendButton = e.target.closest(`
+      button[data-testid="send-button"], 
+      button[aria-label*="Send"], 
+      button[aria-label*="send"],
+      button.send-button
+    `);
 
-  // 2) Clicks on send-like buttons
-  document.addEventListener(
-    "click",
-    (e) => {
-      const target = e.target.closest?.("button, [role='button'], input[type='submit']");
-      if (!target || !looksLikeSendControl(target)) return;
-      const editable = findNearbyEditable(target);
-      const text = getEditableText(editable);
-      if (text) handleSubmission(text);
-    },
-    true
-  );
+    if (sendButton && !sendButton.disabled) {
+      handlePromptSubmit();
+    }
+  });
 
-  // 3) Native form submit
-  document.addEventListener(
-    "submit",
-    (e) => {
-      const editable = e.target.querySelector?.(
-        "textarea, [contenteditable='true'], [contenteditable='']"
-      );
-      const text = getEditableText(editable);
-      if (text) handleSubmission(text);
-    },
-    true
-  );
-})();
+  // 2. Listen for Enter key press
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+
+    const activeElement = document.activeElement;
+    if (!activeElement) return;
+
+    const isAiInput = activeElement.matches(`
+      #prompt-textarea, 
+      div[contenteditable="true"], 
+      textarea[placeholder*="Ask"], 
+      textarea[placeholder*="Message"],
+      rich-textarea div
+    `);
+
+    if (isAiInput && (activeElement.value || activeElement.innerText || "").trim().length > 0) {
+      handlePromptSubmit();
+    }
+  });
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initTracker);
+} else {
+  initTracker();
+}

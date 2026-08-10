@@ -2,15 +2,23 @@
   "manifest_version": 3,
   "name": "AI Water Footprint Tracker",
   "version": "1.0.0",
-  "description": "Estimates the water used by your AI chatbot conversations, on any site, and tallies it in your toolbar.",
+  "description": "Estimates the water used by your AI chatbot conversations and tallies it in your toolbar.",
   "permissions": ["storage"],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
+      ],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

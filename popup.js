@@ -8,6 +8,8 @@ function formatMl(ml) {
 
 function setDropletFill(totalMl) {
   const rect = document.getElementById("fillRect");
+  if (!rect) return;
+  // Fills linearly every 1000 mL cycle (or caps gracefully)
   const progress = totalMl <= 0 ? 0 : ((totalMl - 0.001) % 1000) / 1000;
   const y = 150 - progress * 144;
   rect.setAttribute("y", y.toFixed(1));
@@ -15,6 +17,8 @@ function setDropletFill(totalMl) {
 
 function renderDomains(byDomain) {
   const list = document.getElementById("domainList");
+  if (!list) return;
+  
   const entries = Object.entries(byDomain || {}).sort((a, b) => b[1].totalMl - a[1].totalMl);
 
   if (entries.length === 0) {
@@ -68,11 +72,20 @@ document.getElementById("saveSettings").addEventListener("click", async () => {
 
 document.getElementById("resetBtn").addEventListener("click", async () => {
   if (!confirm("Clear all tracked usage data? This can't be undone.")) return;
+  
+  // 1. Clear storage totals
   await chrome.storage.local.set({
     totals: { totalMl: 0, totalTokens: 0, queryCount: 0 },
     byDomain: {},
     log: []
   });
+
+  // 2. Clear extension icon badge text
+  if (chrome.action?.setBadgeText) {
+    chrome.action.setBadgeText({ text: "" });
+  }
+
+  // 3. Re-render UI
   render();
 });
 
