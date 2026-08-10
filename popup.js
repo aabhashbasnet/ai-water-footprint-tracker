@@ -41,23 +41,39 @@ function renderDomains(byDomain) {
 async function render() {
   const data = await chrome.storage.local.get(["totals", "byDomain", "settings"]);
   const totals = data.totals || { totalMl: 0, totalTokens: 0, queryCount: 0 };
-  const settings = data.settings || { mlPer1000Tokens: 500, charsPerToken: 4 };
+  const settings = data.settings || { mlPer1000Tokens: 0.5, charsPerToken: 4 };
 
-  document.getElementById("totalValue").textContent = formatMl(totals.totalMl);
-  document.getElementById("glassesNote").textContent =
-    `≈ ${fmt(totals.totalMl / 250, 1)} glasses of water (250 mL each)`;
-  document.getElementById("queryCount").textContent = fmt(totals.queryCount);
-  document.getElementById("tokenCount").textContent = fmt(totals.totalTokens);
+  const totalValEl = document.getElementById("totalValue");
+  if (totalValEl) totalValEl.textContent = formatMl(totals.totalMl);
 
-  document.getElementById("mlPer1000").value = settings.mlPer1000Tokens;
-  document.getElementById("charsPerToken").value = settings.charsPerToken;
+  const glassesEl = document.getElementById("glassesNote");
+  if (glassesEl) {
+    glassesEl.textContent = `≈ ${fmt(totals.totalMl / 250, 1)} glasses of water (250 mL each)`;
+  }
+
+  const queryCountEl = document.getElementById("queryCount");
+  if (queryCountEl) queryCountEl.textContent = fmt(totals.queryCount);
+
+  const tokenCountEl = document.getElementById("tokenCount");
+  if (tokenCountEl) tokenCountEl.textContent = fmt(totals.totalTokens);
+
+  const mlInput = document.getElementById("mlPer1000");
+  if (mlInput && document.activeElement !== mlInput) {
+    mlInput.value = settings.mlPer1000Tokens;
+  }
+
+  const charsInput = document.getElementById("charsPerToken");
+  if (charsInput && document.activeElement !== charsInput) {
+    charsInput.value = settings.charsPerToken;
+  }
 
   setDropletFill(totals.totalMl);
   renderDomains(data.byDomain);
 }
 
-document.getElementById("saveSettings").addEventListener("click", async () => {
-  const mlPer1000Tokens = parseFloat(document.getElementById("mlPer1000").value) || 0;
+// Event Listeners
+document.getElementById("saveSettings")?.addEventListener("click", async () => {
+  const mlPer1000Tokens = parseFloat(document.getElementById("mlPer1000").value) || 0.5;
   const charsPerToken = parseFloat(document.getElementById("charsPerToken").value) || 4;
 
   const data = await chrome.storage.local.get(["settings"]);
@@ -65,12 +81,14 @@ document.getElementById("saveSettings").addEventListener("click", async () => {
   await chrome.storage.local.set({ settings });
 
   const btn = document.getElementById("saveSettings");
-  const original = btn.textContent;
-  btn.textContent = "Saved";
-  setTimeout(() => (btn.textContent = original), 1000);
+  if (btn) {
+    const original = btn.textContent;
+    btn.textContent = "Saved";
+    setTimeout(() => (btn.textContent = original), 1000);
+  }
 });
 
-document.getElementById("resetBtn").addEventListener("click", async () => {
+document.getElementById("resetBtn")?.addEventListener("click", async () => {
   if (!confirm("Clear all tracked usage data? This can't be undone.")) return;
   
   // 1. Clear storage totals
@@ -89,4 +107,12 @@ document.getElementById("resetBtn").addEventListener("click", async () => {
   render();
 });
 
+// Re-render automatically when background updates storage
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && (changes.totals || changes.byDomain)) {
+    render();
+  }
+});
+
+// Initial Render
 render();

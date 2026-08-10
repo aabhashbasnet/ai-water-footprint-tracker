@@ -62,10 +62,10 @@ chrome.runtime.onInstalled.addListener(async () => {
     await chrome.storage.local.set({
       settings: {
         charsPerToken: 4,
-        mlPer1000Tokens: 500,
-        minChars: 12,
-        responseSettleMs: 1200,
-        responseTimeoutMs: 20000
+        mlPer1000Tokens: 0.5, // Realistic data center cooling average (~0.5 ml / 1k tokens)
+        minChars: 3,
+        responseSettleMs: 1500,
+        responseTimeoutMs: 30000
       }
     });
   }
