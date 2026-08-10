@@ -32,7 +32,6 @@ Detection is also heuristic by nature, since it works generically across sites r
 5. Click **Load unpacked** and select the unzipped folder (the one containing `manifest.json` directly inside it).
 6. Pin the droplet icon to your toolbar via the puzzle-piece menu.
 
-That's it — no account, no payment, no store review. Visit any AI chat site and start a conversation; click the toolbar icon to see your running total.
 
 ## Privacy
 
