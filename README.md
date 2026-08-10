@@ -1,6 +1,14 @@
-# 💧 AI Water Footprint Tracker
+<p align="center">
+  <img src="icons/icon128.png" alt="AI Water Footprint Tracker icon" width="72">
+</p>
+
+<h1 align="center">AI Water Footprint Tracker</h1>
 
 A Chrome extension that estimates the water used by your AI chatbot conversations — on any AI site, no configuration needed — and tallies a running total in your toolbar.
+
+<p align="center">
+  <img src="screenshots/popup.png" alt="Extension popup showing a running water usage total, a filling droplet graphic, and a per-site breakdown" width="340">
+</p>
 
 ## What it does
 
