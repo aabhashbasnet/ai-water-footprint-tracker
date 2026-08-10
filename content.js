@@ -1,407 +1,233 @@
-
 // AI Water Footprint Tracker — content script
 
 (() => {
   const DEFAULTS = {
     charsPerToken: 4,
-    mlPer1000Tokens: 500,
-    minChars: 12,
-    responseSettleMs: 1200,
-    responseTimeoutMs: 20000
+    mlPer1000Tokens: 0.5,
+    minChars: 2,
+    responseSettleMs: 1500,
+    responseTimeoutMs: 30000
   };
 
   let settings = { ...DEFAULTS };
 
-  // Load saved settings
   chrome.storage.local.get(["settings"], (data) => {
-    if (data && data.settings) {
-      settings = { ...DEFAULTS, ...data.settings };
-    }
+    if (data?.settings) settings = { ...DEFAULTS, ...data.settings };
   });
 
-  // Update settings when popup changes them
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.settings) {
-      settings = {
-        ...DEFAULTS,
-        ...changes.settings.newValue
-      };
+      settings = { ...DEFAULTS, ...changes.settings.newValue };
     }
   });
 
-  // --------------------------------------------------
-  // Identify which AI website we're running on
-  // --------------------------------------------------
-
   function getAIProvider() {
-    const hostname = location.hostname;
-
-    if (
-      hostname === "chatgpt.com" ||
-      hostname === "chat.openai.com"
-    ) {
-      return "ChatGPT";
-    }
-
-    if (hostname === "gemini.google.com") {
-      return "Gemini";
-    }
-
-    if (hostname === "claude.ai") {
-      return "Claude";
-    }
-
+    const host = location.hostname;
+    if (host.includes("chatgpt.com") || host.includes("openai.com")) return "ChatGPT";
+    if (host.includes("gemini.google.com")) return "Gemini";
+    if (host.includes("claude.ai")) return "Claude";
     return "Unknown";
   }
 
   const provider = getAIProvider();
-
-  console.log(`💧 AI Water Tracker loaded on ${provider}`);
-
-  // --------------------------------------------------
-  // Token estimation
-  // --------------------------------------------------
-
-  function estimateTokens(text) {
-    if (!text) return 0;
-
-    return Math.max(
-      0,
-      Math.ceil(text.trim().length / settings.charsPerToken)
-    );
-  }
+  console.log(`💧 AI Water Tracker listening on ${provider}`);
 
   // --------------------------------------------------
-  // Get text from input element
+  // Helper: Extract Text from ChatGPT & Gemini Elements
   // --------------------------------------------------
 
-  function getEditableText(el) {
+  function extractTextFromElement(el) {
     if (!el) return "";
 
-    if (
-      el.tagName === "TEXTAREA" ||
-      el.tagName === "INPUT"
-    ) {
+    // Check target or parent containers for text
+    if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
       return el.value || "";
     }
 
-    if (el.isContentEditable) {
+    if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
       return el.innerText || el.textContent || "";
+    }
+
+    // Gemini specific custom component handling (<rich-textarea> / <p>)
+    const richEditor = el.closest?.("rich-textarea, .ql-editor, [contenteditable]");
+    if (richEditor) {
+      return richEditor.innerText || richEditor.textContent || "";
+    }
+
+    return "";
+  }
+
+  function findActiveInput() {
+    // 1. Try currently focused element
+    let active = document.activeElement;
+    let text = extractTextFromElement(active);
+    if (text.trim()) return text;
+
+    // 2. Query known AI input selectors directly
+    const selectors = [
+      '#prompt-textarea',                           // ChatGPT
+      'rich-textarea [contenteditable="true"]',     // Gemini
+      'div[contenteditable="true"]',                // Claude / General
+      'textarea'
+    ];
+
+    for (const sel of selectors) {
+      const inputEl = document.querySelector(sel);
+      if (inputEl) {
+        text = extractTextFromElement(inputEl);
+        if (text.trim()) return text;
+      }
     }
 
     return "";
   }
 
   // --------------------------------------------------
-  // Report usage to background.js
+  // Token & Usage Calculation
   // --------------------------------------------------
 
-  function reportUsage(queryText, responseText) {
-    const queryTokens = estimateTokens(queryText);
-    const responseTokens = estimateTokens(responseText);
+  function estimateTokens(text) {
+    if (!text) return 0;
+    return Math.max(0, Math.ceil(text.trim().length / settings.charsPerToken));
+  }
 
+  function reportUsage(queryText, responseLength) {
+    const queryTokens = estimateTokens(queryText);
+    const responseTokens = estimateTokens("x".repeat(responseLength));
     const totalTokens = queryTokens + responseTokens;
 
     if (totalTokens === 0) return;
 
-    const estimatedMl =
-      (totalTokens / 1000) * settings.mlPer1000Tokens;
+    const estimatedMl = (totalTokens / 1000) * settings.mlPer1000Tokens;
 
-    console.log("💧 AI Water Usage", {
+    console.log("💧 AI Water Usage Tracked:", {
       provider,
       queryTokens,
       responseTokens,
       totalTokens,
-      estimatedMl
+      estimatedMl: estimatedMl.toFixed(3) + " mL"
     });
 
     chrome.runtime.sendMessage({
       type: "LOG_USAGE",
-
       payload: {
         provider,
         domain: location.hostname,
-
         queryTokens,
         responseTokens,
         totalTokens,
-
         estimatedMl,
-
         timestamp: Date.now()
       }
     });
   }
 
   // --------------------------------------------------
-  // Find input near a button
-  // --------------------------------------------------
-
-  function findNearbyEditable(startEl) {
-    let node = startEl;
-
-    for (let i = 0; i < 4 && node; i++) {
-      const container =
-        node.closest?.(
-          "form, [role='form'], div"
-        ) || node;
-
-      const candidate =
-        container?.querySelector?.(
-          "textarea, [contenteditable='true'], [contenteditable='']"
-        );
-
-      if (candidate) {
-        return candidate;
-      }
-
-      node = node.parentElement;
-    }
-
-    return document.activeElement;
-  }
-
-  // --------------------------------------------------
-  // Track submission
+  // Submission & Response Observers
   // --------------------------------------------------
 
   let lastSubmitAt = 0;
-  let watching = false;
+  let isWatching = false;
 
   function handleSubmission(text) {
     const trimmed = text.trim();
-
-    if (trimmed.length < settings.minChars) {
-      return;
-    }
+    if (trimmed.length < settings.minChars) return;
 
     const now = Date.now();
-
-    // Prevent duplicate events
-    if (now - lastSubmitAt < 800) {
-      return;
-    }
-
+    if (now - lastSubmitAt < 1000) return; // Prevent double logging
     lastSubmitAt = now;
 
-    console.log("📤 AI query detected:", trimmed);
-
+    console.log("📤 Detected Prompt:", trimmed);
     watchForResponse(trimmed);
   }
 
-  // --------------------------------------------------
-  // Watch for AI response
-  // --------------------------------------------------
-
   function watchForResponse(queryText) {
-    if (watching) {
-      return;
-    }
+    if (isWatching) return;
+    isWatching = true;
 
-    watching = true;
+    // Response element selectors per platform
+    const SELECTORS = {
+      ChatGPT: '[data-message-author-role="assistant"]',
+      Gemini: 'model-response, message-content, .response-container-content',
+      Claude: '.font-claude-message',
+      Unknown: 'article, [role="article"]'
+    };
+
+    const selector = SELECTORS[provider] || SELECTORS.Unknown;
+    const initialCount = document.querySelectorAll(selector).length;
 
     let settleTimer = null;
-    let addedChars = 0;
-
-    const startedAt = Date.now();
+    let timeoutTimer = null;
 
     const finish = () => {
       observer.disconnect();
+      clearTimeout(settleTimer);
+      clearTimeout(timeoutTimer);
+      isWatching = false;
 
-      watching = false;
+      const currentResponses = document.querySelectorAll(selector);
+      let responseLength = 0;
 
-      const responseText =
-        "x".repeat(addedChars);
+      if (currentResponses.length > 0) {
+        const latest = currentResponses[currentResponses.length - 1];
+        responseLength = (latest.innerText || latest.textContent || "").trim().length;
+      }
 
-      console.log(
-        "📥 AI response detected:",
-        addedChars,
-        "characters"
-      );
-
-      reportUsage(
-        queryText,
-        responseText
-      );
+      reportUsage(queryText, responseLength);
     };
 
-    const observer =
-      new MutationObserver((mutations) => {
+    const resetSettleTimer = () => {
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(finish, settings.responseSettleMs);
+    };
 
-        for (const mutation of mutations) {
+    const observer = new MutationObserver(() => {
+      resetSettleTimer();
+    });
 
-          mutation.addedNodes.forEach((node) => {
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
 
-            if (
-              node.nodeType === Node.TEXT_NODE
-            ) {
-              addedChars +=
-                node.textContent.trim().length;
-            }
-
-            else if (
-              node.nodeType === Node.ELEMENT_NODE
-            ) {
-              const text =
-                node.innerText ||
-                node.textContent ||
-                "";
-
-              addedChars +=
-                text.trim().length;
-            }
-
-          });
-        }
-
-        clearTimeout(settleTimer);
-
-        // Maximum response waiting time
-        if (
-          Date.now() - startedAt >
-          settings.responseTimeoutMs
-        ) {
-          finish();
-          return;
-        }
-
-        // Response is considered finished
-        // after the DOM is quiet
-        settleTimer = setTimeout(
-          finish,
-          settings.responseSettleMs
-        );
-      });
-
-    observer.observe(
-      document.body,
-      {
-        childList: true,
-        subtree: true
-      }
-    );
-
-    // Give up if nothing happens
-    settleTimer = setTimeout(
-      finish,
-      settings.responseTimeoutMs
-    );
+    timeoutTimer = setTimeout(finish, settings.responseTimeoutMs);
+    resetSettleTimer();
   }
 
   // --------------------------------------------------
-  // Detect Enter key
+  // Global Event Capturing (Capture Phase = True)
   // --------------------------------------------------
 
-  document.addEventListener(
+  // 1. Capture 'Enter' Key BEFORE input is cleared
+  window.addEventListener(
     "keydown",
-
     (e) => {
+      if (e.key !== "Enter" || e.shiftKey) return;
 
-      if (
-        e.key !== "Enter" ||
-        e.shiftKey
-      ) {
-        return;
-      }
-
-      const el = e.target;
-
-      const text =
-        getEditableText(el);
-
-      if (
-        text &&
-        text.trim().length >=
-          settings.minChars
-      ) {
+      const text = findActiveInput();
+      if (text) {
         handleSubmission(text);
       }
     },
-
-    true
+    true // Capture phase execution
   );
 
-  // --------------------------------------------------
-  // Detect send button clicks
-  // --------------------------------------------------
-
-  document.addEventListener(
+  // 2. Capture clicks on send buttons / icons
+  window.addEventListener(
     "click",
-
     (e) => {
+      const btn = e.target.closest(
+        'button, [role="button"], input[type="submit"], [aria-label*="Send"], [aria-label*="Submit"]'
+      );
 
-      const target =
-        e.target.closest?.(
-          "button, [role='button'], input[type='submit']"
-        );
+      if (!btn) return;
 
-      if (!target) {
-        return;
-      }
-
-      const label = (
-        target.getAttribute?.("aria-label") ||
-        target.getAttribute?.("title") ||
-        target.textContent ||
-        ""
-      ).toLowerCase();
-
-      const sendKeywords = [
-        "send",
-        "submit",
-        "ask",
-        "generate"
-      ];
-
-      const isSendButton =
-        target.type === "submit" ||
-        sendKeywords.some(
-          (keyword) =>
-            label.includes(keyword)
-        );
-
-      if (!isSendButton) {
-        return;
-      }
-
-      const editable =
-        findNearbyEditable(target);
-
-      const text =
-        getEditableText(editable);
-
+      const text = findActiveInput();
       if (text) {
         handleSubmission(text);
       }
     },
-
-    true
+    true // Capture phase execution
   );
-
-  // --------------------------------------------------
-  // Detect form submission
-  // --------------------------------------------------
-
-  document.addEventListener(
-    "submit",
-
-    (e) => {
-
-      const editable =
-        e.target.querySelector?.(
-          "textarea, [contenteditable='true'], [contenteditable='']"
-        );
-
-      const text =
-        getEditableText(editable);
-
-      if (text) {
-        handleSubmission(text);
-      }
-    },
-
-    true
-  );
-
 })();
-
